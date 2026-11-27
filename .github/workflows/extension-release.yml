@@ -1,0 +1,139 @@
+name: Share download extension
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing vX.Y.Z tag for a signed APK. Leave blank to build a debug APK.'
+        type: string
+        required: false
+      publish_release:
+        description: 'Also publish the signed APK to GitHub Releases'
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extension-${{ inputs.release_tag || (github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name) || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || (github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name) || '' }}
+    outputs:
+      tag_object: ${{ steps.source.outputs.tag_object }}
+      release_tag: ${{ steps.source.outputs.release_tag }}
+    steps:
+      - name: Validate packaging request
+        env:
+          PUBLISH_RELEASE: ${{ inputs.publish_release }}
+        run: |
+          if [[ -n "$RELEASE_TAG" && ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo '::error::A release tag must have the format vX.Y.Z.'
+            exit 1
+          fi
+          if [[ "$PUBLISH_RELEASE" == true && -z "$RELEASE_TAG" ]]; then
+            echo '::error::Provide an existing release tag to publish an APK.'
+            exit 1
+          fi
+
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.sha }}
+
+      - name: Verify release source
+        if: env.RELEASE_TAG != ''
+        id: source
+        run: |
+          source_commit=$(git rev-parse HEAD)
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            source_commit=$(git rev-parse "${GITHUB_SHA}^{commit}")
+          fi
+          workflow_source="$RUNNER_TEMP/extension-workflow"
+          mkdir -p "$workflow_source"
+          git archive "$GITHUB_WORKFLOW_SHA" .github/scripts | tar -x -C "$workflow_source"
+          bash "$workflow_source/.github/scripts/verify-release.sh" "$RELEASE_TAG" "$source_commit"
+          printf 'release_tag=%s\ntag_object=%s\n' "$RELEASE_TAG" \
+            "$(git rev-parse "refs/tags/$RELEASE_TAG")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: ''
+
+      - name: Install SDK packages
+        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.14.3'
+
+      - name: Build and lint debug
+        run: gradle --no-daemon :app:assembleDebug :app:lintDebug
+
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'workflow_dispatch' && env.RELEASE_TAG == ''
+        with:
+          name: share-download-extension-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Build and verify signed extension
+        if: env.RELEASE_TAG != ''
+        env:
+          KEYSTORE_BASE64: ${{ secrets.BDPLAYER_KEYSTORE_BASE64 }}
+          BDPLAYER_STORE_PASSWORD: ${{ secrets.BDPLAYER_STORE_PASSWORD }}
+          BDPLAYER_KEY_ALIAS: ${{ secrets.BDPLAYER_KEY_ALIAS }}
+          BDPLAYER_KEY_PASSWORD: ${{ secrets.BDPLAYER_KEY_PASSWORD }}
+        run: |
+          export EXTENSION_PROJECT_DIR="$GITHUB_WORKSPACE"
+          bash "$RUNNER_TEMP/extension-workflow/.github/scripts/build-signed-extension.sh" "$RELEASE_TAG"
+
+      - uses: actions/upload-artifact@v7
+        if: env.RELEASE_TAG != ''
+        with:
+          name: share-download-extension-release
+          path: build/releases/baidu-shike-share-download-arm64.apk
+          if-no-files-found: error
+
+  publish:
+    if: needs.build.outputs.release_tag != '' && (github.event_name == 'push' || inputs.publish_release)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: share-download-extension-release
+          path: dist
+
+      - name: Publish extension release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+          BUILD_TAG_OBJECT: ${{ needs.build.outputs.tag_object }}
+        run: bash .github/scripts/publish-extension-release.sh
