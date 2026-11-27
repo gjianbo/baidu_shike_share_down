@@ -11,6 +11,9 @@
         android:label="@string/app_name"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:usesCleartextTraffic="false">
+        <meta-data
+            android:name="com.hnwd.bdplayer.SETTINGS_PAGES_V1"
+            android:value="download,site_sessions" />
         <activity android:name=".ShareActivity" android:excludeFromRecents="true" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />

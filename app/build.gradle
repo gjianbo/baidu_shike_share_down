@@ -22,6 +22,9 @@ def releaseStorePassword = System.getenv('BDPLAYER_STORE_PASSWORD') ?: signingPr
 def releaseKeyAlias = System.getenv('BDPLAYER_KEY_ALIAS') ?: signingProps.getProperty('bdplayer.keyAlias')
 def releaseKeyPassword = System.getenv('BDPLAYER_KEY_PASSWORD') ?: signingProps.getProperty('bdplayer.keyPassword')
 
+def ytDlpVersion = '2026.11.23'
+def ytDlpSha256 = 'e8665ed64d6b9172773e812f891fb707a0cb1ee8d9ef4fc1acb00cabee4c5256'
+
 android {
     namespace 'com.hnwd.bdplayer.extension'
     compileSdk 36
@@ -30,12 +33,16 @@ android {
         applicationId 'com.hnwd.bdplayer_ext_share'
         minSdk 29
         targetSdk 35
-        versionCode 2
-        versionName '0.2.0'
+        versionCode 3
+        versionName '0.2.1'
+        buildConfigField 'String', 'YTDLP_VERSION', '"' + ytDlpVersion + '"'
         ndk { abiFilters 'arm64-v8a' }
     }
 
-    buildFeatures { aidl true }
+    buildFeatures {
+        aidl true
+        buildConfig true
+    }
     packaging { jniLibs { useLegacyPackaging = true } }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -57,7 +64,60 @@ android {
 
 kotlin { jvmToolchain(17) }
 
+def upstreamFfmpeg = configurations.create('upstreamFfmpeg') {
+    canBeConsumed = false
+    transitive = false
+    attributes {
+        attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage, Usage.JAVA_RUNTIME))
+        attribute(Category.CATEGORY_ATTRIBUTE, objects.named(Category, Category.LIBRARY))
+    }
+}
+def alignedFfmpeg = layout.buildDirectory.file('generated/ffmpeg/ffmpeg-arm64.aar')
+def ffmpegAlignment = rootProject.file('tools/ffmpeg_alignment.py')
+def sdkPath = androidComponents.sdkComponents.sdkDirectory
+def ndkPath = providers.environmentVariable('SHIKE_ANDROID_NDK').orElse(
+    sdkPath.map { new File(it.asFile, 'ndk/28.2.13676358').absolutePath },
+)
+def prepareAlignedFfmpeg = tasks.register('prepareAlignedFfmpeg', Exec) {
+    inputs.files(upstreamFfmpeg)
+    inputs.file(ffmpegAlignment)
+    inputs.property('ndkPath', ndkPath)
+    outputs.file(alignedFfmpeg)
+    doFirst {
+        commandLine 'python3', ffmpegAlignment, 'build', upstreamFfmpeg.singleFile,
+            alignedFfmpeg.get().asFile, temporaryDir, ndkPath.get()
+    }
+}
+
+abstract class PrepareYtDlp extends DefaultTask {
+    @Input abstract Property<String> getVersion()
+    @Input abstract Property<String> getSha256()
+    @InputFile abstract RegularFileProperty getScript()
+    @OutputDirectory abstract DirectoryProperty getOutputDirectory()
+
+    @javax.inject.Inject abstract org.gradle.process.ExecOperations getExecOperations()
+
+    @TaskAction
+    void download() {
+        execOperations.exec {
+            commandLine 'python3', script.get().asFile, version.get(), sha256.get(),
+                outputDirectory.file('raw/ytdlp').get().asFile
+        }
+    }
+}
+
+def prepareYtDlp = tasks.register('prepareYtDlp', PrepareYtDlp) {
+    version.set(ytDlpVersion)
+    sha256.set(ytDlpSha256)
+    script.set(rootProject.file('tools/fetch_ytdlp.py'))
+    outputDirectory.set(layout.buildDirectory.dir('generated/ytdlp/res'))
+}
+androidComponents.onVariants(androidComponents.selector().all()) { variant ->
+    variant.sources.res.addGeneratedSourceDirectory(prepareYtDlp, { it.outputDirectory })
+}
+
 dependencies {
+    testImplementation 'junit:junit:4.13.2'
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.activity:activity:1.8.0'
@@ -65,5 +125,6 @@ dependencies {
 
 
     implementation 'io.github.junkfood02.youtubedl-android:library:0.18.1'
-    implementation 'io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1'
+    add('upstreamFfmpeg', 'io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1')
+    implementation files(alignedFfmpeg).builtBy(prepareAlignedFfmpeg)
 }

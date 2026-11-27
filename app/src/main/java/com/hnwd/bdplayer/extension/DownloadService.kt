@@ -10,6 +10,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.StatFs
+import android.util.AtomicFile
 import com.hnwd.bdplayer.extension.api.IDownloadCallback
 import com.hnwd.bdplayer.extension.api.IDownloadService
 import com.yausername.ffmpeg.FFmpeg
@@ -42,7 +43,7 @@ class DownloadService : Service() {
             verifyCaller()
             return Bundle().apply {
                 putInt("protocol", 1)
-                putString("engine", "youtubedl-android/0.18.1")
+                putString("engine", "yt-dlp/${BuildConfig.YTDLP_VERSION}")
                 putStringArray("sites", Site.entries.map { it.name }.toTypedArray())
             }
         }
@@ -54,7 +55,7 @@ class DownloadService : Service() {
             var accepted = false
             try {
                 verifyCaller()
-                val link = url?.takeIf { it.length <= 2048 }?.let(MediaLink::parse)
+                val link = url?.let(MediaLink::parse)
                 if (link == null || output == null || callback == null ||
                     taskId.isNullOrBlank() || taskId.length > 80 ||
                     attemptId.isNullOrBlank() || attemptId.length > 80 ||
@@ -141,6 +142,7 @@ class DownloadService : Service() {
             state(job, "PARSING")
             val engine = YoutubeDL.getInstance()
             try {
+                prepareBundledExtractor()
                 engine.init(applicationContext)
                 FFmpeg.getInstance().init(applicationContext)
             } catch (_: Exception) {
@@ -155,8 +157,17 @@ class DownloadService : Service() {
                 addOption("--no-quiet")
                 addOption("--progress")
                 addOption("--socket-timeout", "20")
-                addOption("-f", "bv[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]/bv[ext=mp4]+ba[ext=m4a]")
+                val formats = "bv[ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]/bv[ext=mp4]+ba[ext=m4a]"
+                addOption("-f", when (link.site) {
+                    Site.XIAOHONGSHU -> "$formats/bv[ext=mp4]"
+                    Site.YOUTUBE -> "$formats/bv+ba/b"
+                    else -> formats
+                })
                 addOption("--merge-output-format", "mp4")
+                if (link.site == Site.YOUTUBE) {
+                    addOption("--match-filters", YOUTUBE_REPLAY_FILTER)
+                    addOption("--remux-video", "mp4")
+                }
                 addOption("-o", File(bucket, "%(title).120B [%(id)s].%(ext)s").path)
                 addOption("--print", "after_move:filepath")
                 if (cookies.isNotEmpty()) {
@@ -183,12 +194,17 @@ class DownloadService : Service() {
                     }
                 }
             } catch (error: Exception) {
-                throw engineFailure(error.message.orEmpty())
+                throw engineFailure(link.site, error.message.orEmpty())
             }
-            if (response.exitCode != 0) throw engineFailure(response.err.orEmpty())
+            val stdout = response.out.orEmpty()
+            val stderr = response.err.orEmpty()
+            if (link.site == Site.YOUTUBE && (isFilteredLive(stdout) || isFilteredLive(stderr))) {
+                throw DownloadFailure("LIVE_NOT_READY")
+            }
+            if (response.exitCode != 0) throw engineFailure(link.site, stderr)
 
             val rootPath = bucket.canonicalPath
-            val artifacts = response.out.orEmpty().lineSequence()
+            val artifacts = stdout.lineSequence()
                 .filter { it.startsWith("$rootPath/") && it.endsWith(".mp4", ignoreCase = true) }
                 .map { File(it).canonicalFile }
                 .filter { it.parent == rootPath && it.isFile }
@@ -237,20 +253,52 @@ class DownloadService : Service() {
         }
     }
 
+    private fun prepareBundledExtractor() {
+        val directory = File(noBackupFilesDir, "${YoutubeDL.baseName}/${YoutubeDL.ytdlpDirName}")
+        val executable = File(directory, YoutubeDL.ytdlpBin)
+        val prefs = getSharedPreferences("bundled_extractor", MODE_PRIVATE)
+        if (executable.length() > 0 && prefs.getString("version", null) == BuildConfig.YTDLP_VERSION) return
+        check(directory.mkdirs() || directory.isDirectory)
+        val target = AtomicFile(executable)
+        val output = target.startWrite()
+        try {
+            val bytes = resources.openRawResource(R.raw.ytdlp).use { it.copyTo(output) }
+            target.finishWrite(output)
+            check(bytes > 0 && executable.length() == bytes)
+            check(prefs.edit().putString("version", BuildConfig.YTDLP_VERSION).commit())
+        } catch (error: Exception) {
+            target.failWrite(output)
+            throw error
+        }
+    }
+
     private fun state(job: Job, value: String, details: Bundle = Bundle()) {
         runCatching { job.callback.onState(job.taskId, job.attemptId, value, details) }
     }
 
-    private fun engineFailure(message: String): DownloadFailure {
+    private fun engineFailure(site: Site, message: String): DownloadFailure {
         val text = message.lowercase(Locale.ROOT)
         val requiresSession = listOf("fresh cookies", "login required", "log in", "sign in",
             "cookies are needed", "cookies are required", "requires authentication").any(text::contains)
-        return DownloadFailure(if (requiresSession) "SESSION_REQUIRED" else "ENGINE_FAILED")
+        return DownloadFailure(when {
+            site == Site.YOUTUBE && isFilteredLive(message) -> "LIVE_NOT_READY"
+            requiresSession || site == Site.XIAOHONGSHU && listOf(
+                "xiaohongshu.com/login", "登录后", "请登录",
+            ).any(text::contains) -> "SESSION_REQUIRED"
+            site == Site.XIAOHONGSHU && "no video formats found" in text -> "NO_VIDEO"
+            else -> "ENGINE_FAILED"
+        })
     }
 
     private class DownloadFailure(val code: String) : Exception()
 
     private companion object {
+        const val YOUTUBE_REPLAY_FILTER = "live_status !=? is_live & live_status !=? is_upcoming & !is_live"
+
+        fun isFilteredLive(output: String): Boolean = output.lineSequence().any { line ->
+            line.startsWith("[download] ") && "does not pass filter" in line && YOUTUBE_REPLAY_FILTER in line
+        }
+
         val worker = Executors.newSingleThreadExecutor()
         var cleaned = false
 

@@ -17,3 +17,9 @@ badging=$("$tools/aapt2" dump badging "$apk")
 grep -F "package: name='com.hnwd.bdplayer_ext_share'" <<< "$badging"
 grep -F "versionName='${tag#v}'" <<< "$badging" >/dev/null
 grep -Fx "native-code: 'arm64-v8a'" <<< "$badging"
+
+# Historical tags predate the 16 KB runtime. Only enforce it for sources that build it.
+alignment_checker="${EXTENSION_PROJECT_DIR:-$PWD}/tools/ffmpeg_alignment.py"
+if [[ "$tag" != v0.2.0 ]]; then
+    python3 "$alignment_checker" verify "$apk"
+fi
