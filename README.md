@@ -26,7 +26,7 @@ gradle :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
 
 在 GitHub Actions 手动运行时，留空 `release_tag` 会生成调试 APK，填写已有标签会生成签名 APK。这两种产物都可在运行页面的 Artifacts 下载。手动运行时勾选 `publish_release` 才会把签名 APK 上传到 Release。
 
-本地可以运行 `bash .github/scripts/build-signed-extension.sh v0.2.1`，版本取当前源码。通过校验的正式包位于 `build/releases/`。
+本地可以运行 `bash .github/scripts/build-signed-extension.sh v0.2.2`，版本取当前源码。通过校验的正式包位于 `build/releases/`。
 
 扩展 Actions 直接读取组织级 Secrets，使用与拾课主程序相同的签名。组织配置项为 `BDPLAYER_KEYSTORE_BASE64`、`BDPLAYER_STORE_PASSWORD`、`BDPLAYER_KEY_ALIAS` 和 `BDPLAYER_KEY_PASSWORD`。工作流校验 APK 的签名证书与已发布主包一致，并核对包名、版本与 ARM64 ABI，再将 `baidu-shike-share-download-arm64.apk` 上传到该 tag 的公开 Release。
 

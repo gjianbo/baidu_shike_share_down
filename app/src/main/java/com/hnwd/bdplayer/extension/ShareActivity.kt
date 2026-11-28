@@ -12,6 +12,11 @@ internal const val HOST_PACKAGE = "com.hnwd.bdplayer"
 class ShareActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (intent.action == Intent.ACTION_VIEW) {
+            Toast.makeText(this, R.string.activation_ready, Toast.LENGTH_SHORT).show()
+            finish()
+            return
+        }
         if (savedInstanceState == null && intent.action == Intent.ACTION_SEND && intent.type == "text/plain") {
             val sharedText = runCatching { intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString() }.getOrNull()
             val link = sharedText?.let(MediaLink::fromShare)

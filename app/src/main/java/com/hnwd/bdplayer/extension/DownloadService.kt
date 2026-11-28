@@ -239,7 +239,7 @@ class DownloadService : Service() {
             result.putString("code", "DOWNLOAD_FAILED")
         } finally {
             runCatching { output.close() }
-            directory?.deleteRecursively()
+            runCatching { directory?.deleteRecursively() }
             runCatching { job.callback.asBinder().unlinkToDeath(death, 0) }
             synchronized(job) {
                 job.finished = true
@@ -280,14 +280,15 @@ class DownloadService : Service() {
         val text = message.lowercase(Locale.ROOT)
         val requiresSession = listOf("fresh cookies", "login required", "log in", "sign in",
             "cookies are needed", "cookies are required", "requires authentication").any(text::contains)
-        return DownloadFailure(when {
+        val code = when {
             site == Site.YOUTUBE && isFilteredLive(message) -> "LIVE_NOT_READY"
             requiresSession || site == Site.XIAOHONGSHU && listOf(
                 "xiaohongshu.com/login", "登录后", "请登录",
             ).any(text::contains) -> "SESSION_REQUIRED"
             site == Site.XIAOHONGSHU && "no video formats found" in text -> "NO_VIDEO"
             else -> "ENGINE_FAILED"
-        })
+        }
+        return DownloadFailure(code)
     }
 
     private class DownloadFailure(val code: String) : Exception()

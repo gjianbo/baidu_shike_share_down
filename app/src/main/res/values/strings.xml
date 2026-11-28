@@ -2,4 +2,5 @@
     <string name="app_name">拾课分享下载</string>
     <string name="unsupported_link">未找到支持的分享视频链接</string>
     <string name="host_unavailable">请安装与扩展签名一致且支持扩展的拾课版本</string>
+    <string name="activation_ready">分享下载扩展已就绪</string>
 </resources>
